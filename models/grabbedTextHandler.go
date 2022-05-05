@@ -2,6 +2,7 @@ package models
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	goose "github.com/advancedlogic/GoOse"
 	"github.com/beevik/ntp"
@@ -13,52 +14,61 @@ import (
 	"time"
 )
 
+type ParseURL struct {
+	Url string `json:"url"`
+}
 type GrabbedText struct {
-	Id       	string 		`json:"id"`
-	Url 		string		`json:"url"`
-	GrabText	string 		`json:"grabtext""`
-	GrabDate	time.Time 	`json:"grab_date"`
+	Id       string    `json:"id"`
+	Url      string    `json:"url"`
+	GrabText string    `json:"grabtext"`
+	GrabDate time.Time `json:"grab_date"`
 }
 
 var pagesite1 []GrabbedText
 
-func PrintCurrentTime() time.Time{
-	//получаем данные о текущем времени с NTP сервера
+func PrintCurrentTime() time.Time {
 	time, err := ntp.Time("ntp5.stratum2.ru")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Err: %v\n", err)
 		os.Exit(1)
 	}
 	return time
-	//Форматировано выводим текущее время
-	//fmt.Println(time.Format("Сейчас: 15:04:05 MST"))
 }
 
-func htmlExtractor(p GrabbedText) string {
+func htmlExtractor(p ParseURL) (string, error) {
 	g := goose.New()
-
-	grabbing, _ := g.ExtractFromURL(p.Url)
+	grabbing, err := g.ExtractFromURL(p.Url)
+	if err != nil {
+		return "", err
+	}
 	grabText := grabbing.CleanedText
-	extraLinks := parsePages(grabbing.Links, g)
-
+	fmt.Println("text:", grabText)
+	if grabText == "" {
+		fmt.Println("text:", grabText)
+		return "", errors.New("недоступная ссылка")
+	}
+	fmt.Println(grabText)
 	builder := strings.Builder{}
-	builder.Grow(len(grabText) + len(extraLinks))
-	builder.WriteString(grabText)
-	builder.WriteString(extraLinks)
 
+	if len(grabbing.Links) != 0 {
+		extraLinks := parsePages(grabbing.Links, g)
+		builder.Grow(len(grabText) + len(extraLinks))
+		builder.WriteString(grabText)
+		builder.WriteString(extraLinks)
+	}
+	builder.Grow(len(grabText))
+	builder.WriteString(grabText)
 	text := builder.String()
 
-	return text
+	return text, nil
 }
 
-
-func parsePages(pages []string, g goose.Goose) string{
+func parsePages(pages []string, g goose.Goose) string {
 	var articlePage *goose.Article
 	var err error
-	for _, page := range pages{
+	for _, page := range pages {
 		articlePage, err = g.ExtractFromURL(page)
-		if err != nil{
-			fmt.Println(page, ": ошибка обработки страницы")
+		if err != nil {
 			continue
 		}
 	}
@@ -93,18 +103,22 @@ func PageSitesGETHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-
 func PageSitePOSTHandler(w http.ResponseWriter, r *http.Request) {
-	db := OpenConnection()
 
-	var p GrabbedText
+	db := OpenConnection()
+	var p ParseURL
 	err := json.NewDecoder(r.Body).Decode(&p)
 	if err != nil {
+		fmt.Println(err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	grabText := htmlExtractor(p)
+	grabText, err := htmlExtractor(p)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	date := PrintCurrentTime().Format("2006-01-02 15:04:05")
 
 	sqlStatement := `INSERT INTO grabbedtexts (url, grabtext, grabdate) VALUES ($1, $2, $3)`
@@ -147,14 +161,13 @@ func PageSiteGETHandler(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func PageSiteDELETEHandler(w http.ResponseWriter, r *http.Request)  {
+func PageSiteDELETEHandler(w http.ResponseWriter, r *http.Request) {
 	db := OpenConnection()
 	params := mux.Vars(r)
 	idGet := params["id"]
-	fmt.Println(idGet)
 	_, err := db.Exec("DELETE FROM grabbedtexts where id=$1", idGet)
 
-	if err != nil{
+	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		log.Fatal(err)
 	}
@@ -163,7 +176,7 @@ func PageSiteDELETEHandler(w http.ResponseWriter, r *http.Request)  {
 	defer db.Close()
 }
 
-func PageSitePUTHandler(w http.ResponseWriter, r *http.Request)  {
+func PageSitePUTHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Print(1)
 	db := OpenConnection()
 	params := mux.Vars(r)
@@ -178,7 +191,7 @@ func PageSitePUTHandler(w http.ResponseWriter, r *http.Request)  {
 	}
 
 	sqlStatement := `UPDATE grabbedtexts SET url = $1, grabtext = $2, grabdate = $3 WHERE id = $4`
-	_, err = db.Exec(sqlStatement, p.Id, p.Url, p.GrabText, p.GrabDate, idGet)
+	_, err = db.Exec(sqlStatement, p.Url, p.GrabText, p.GrabDate, idGet)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		log.Fatal(err)
